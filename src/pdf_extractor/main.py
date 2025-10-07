@@ -24,12 +24,17 @@ class PDFExerciseExtractor:
             config: Configuration object with extraction parameters
         """
         self.config = config or ExtractionConfig()
-        # Precompile the regex pattern for finding "Sample Exercise" sections
-        # Handles both regular spacing and line breaks between "Sample" and "Exercise"
-        self.pattern = re.compile(
+        # Store the pattern string for use with PyMuPDF's search_for
+        # However, PyMuPDF search_for doesn't support complex regex patterns
+        # So we'll use a simpler search approach
+        self.base_search_str = "Sample Exercise"
+        # Also keep the compiled version for proper regex matching and other uses
+        self.pattern_compiled = re.compile(
             self.config.pattern_regex, 
             re.IGNORECASE
         )
+        # And keep the original pattern string for bbox operations
+        self.pattern_str = self.config.pattern_regex
     
     def extract_exercises(self, input_pdf_path: str, output_pdf_path: str) -> int:
         """
@@ -71,7 +76,7 @@ class PDFExerciseExtractor:
                     header_bbox, 
                     input_doc, 
                     page_num,
-                    self.pattern,
+                    self.pattern_str,
                     self.config.max_pages_to_search
                 )
                 
@@ -110,7 +115,7 @@ class PDFExerciseExtractor:
                         header_bbox, 
                         input_doc, 
                         page_num,
-                        self.pattern
+                        self.pattern_str
                     )
                     
                     # If a valid section was found, add it to output
@@ -164,17 +169,69 @@ class PDFExerciseExtractor:
         """
         headers = []
         
-        # Search for all instances of the pattern
-        text_instances = page.search_for(self.pattern)
+        # Search for the base string "Sample Exercise" using PyMuPDF's search
+        text_instances = page.search_for(self.base_search_str)
         
-        # Filter to ensure we only get actual headers (not just text mentions)
+        # Extract the full text from the page with position information
+        # to properly match our regex pattern
+        page_text_dict = page.get_text("dict")
+        
+        # For each found instance, we'll check if it matches our expected pattern
         for inst in text_instances:
-            # Get text blocks that contain the match
-            textpage = page.get_textpage()
-            # Check if the text instance is in a block that looks like a header
-            # by analyzing the text block's properties (font size, etc.)
-            if self._is_header_format(page, inst):
-                headers.append(inst)
+            # Get the text near this instance to check if it matches our full regex
+            # Extract text from the page with position information
+            inst_text = None
+            
+            for block in page_text_dict.get("blocks", []):
+                if "lines" in block:  # Text block
+                    for line in block["lines"]:
+                        for span in line["spans"]:
+                            span_bbox = fitz.Rect(span["bbox"])
+                            
+                            # If the span bbox intersects with our target instance
+                            if span_bbox.intersects(inst):
+                                # Get more context around the instance
+                                full_page_text = page.get_text()
+                                
+                                # Search for our full pattern in the text
+                                matches = self.pattern_compiled.findall(full_page_text)
+                                if matches:
+                                    # Now we need to map back to the actual positions
+                                    # A better approach: search in the page text and match positions
+                                    for match in self.pattern_compiled.finditer(full_page_text):
+                                        matched_text = match.group(0)
+                                        
+                                        # Search for this matched text in the page to get its position
+                                        possible_instances = page.search_for(matched_text)
+                                        for possible_inst in possible_instances:
+                                            # Check if this possible instance is in the right area
+                                            # and check if it's a proper header
+                                            if self._is_header_format(page, possible_inst):
+                                                # Avoid duplicates by checking if this is close to our original instance
+                                                if (abs(possible_inst.x0 - inst.x0) < 50 and 
+                                                    abs(possible_inst.y0 - inst.y0) < 20):
+                                                    if possible_inst not in headers:
+                                                        headers.append(possible_inst)
+        
+        # Alternative approach: Get all text and search for full pattern, then map to positions
+        if not headers:
+            # Get all text from the page
+            full_text = page.get_text()
+            
+            # Find all matches using our regex
+            matches = list(self.pattern_compiled.finditer(full_text))
+            
+            for match in matches:
+                matched_text = match.group(0)
+                
+                # Find the position of this text in the page
+                # Search for this specific text to get its bounding box
+                text_positions = page.search_for(matched_text)
+                
+                for pos in text_positions:
+                    if self._is_header_format(page, pos):
+                        if pos not in headers:
+                            headers.append(pos)
         
         return headers
 
