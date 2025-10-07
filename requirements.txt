@@ -1,0 +1,5 @@
+# PDF processing
+PyMuPDF>=1.23.0
+
+# Progress bars (optional)
+tqdm>=4.65.0
